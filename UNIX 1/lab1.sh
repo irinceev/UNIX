@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Запоминаем стартовую папку, чтобы знать, куда возвращать результат
+# Стартовая папка
 START_DIR=$(pwd)
 
 #1. Возвращать информативный код ошибки 
@@ -52,12 +52,12 @@ trap cleanup EXIT HUP INT TERM
 # Копируем исходник во временную папку
 cp "$SOURCE_FILE" "$TEMP_DIR/$SOURCE_FILENAME"
 
-# Переходим во временный каталог (теперь работаем ВНУТРИ него)
-cd "$TEMP_DIR" || error_exit "Не удалось перейти в $TEMP_DIR"
+# Переходим во временный каталог 
+cd "$TEMP_DIR"
 
 echo "Компиляция C++ файла началась"
 
-# Компилируем текущий файл ($SOURCE_FILENAME) в текущую папку (имя просто $OUTPUT_FILENAME)
+# Компилируем
 if g++ -o "$OUTPUT_FILENAME" "$SOURCE_FILENAME"; then
     COMPILATION_SUCCESSFUL=true
 else
@@ -67,7 +67,7 @@ fi
 # Проверка наличия скомпилированного файла
 if [ "$COMPILATION_SUCCESSFUL" = true ]; then
     if [ -f "$OUTPUT_FILENAME" ]; then
-        # Возвращаем файл обратно, используя абсолютный путь ($START_DIR)
+        # Возвращаем файл обратно
         mv "$OUTPUT_FILENAME" "$START_DIR/$SOURCE_DIR/"
         echo "Компиляция окончена. Результат: $START_DIR/$SOURCE_DIR/$OUTPUT_FILENAME"
     else
