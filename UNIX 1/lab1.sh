@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Запоминаем стартовую папку, чтобы знать, куда возвращать результат
+START_DIR=$(pwd)
+
 #1. Возвращать информативный код ошибки 
 error_exit() {
     echo "ОШИБКА: $1" >&2
@@ -8,6 +11,7 @@ error_exit() {
 
 # Для очистки временного каталога
 cleanup() {
+    cd "$START_DIR"
     if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
         rm -rf "$TEMP_DIR"
     fi
@@ -45,9 +49,16 @@ TEMP_DIR=$(mktemp -d XXXXXXX)
 # 4. Каталог должен быть удалён при любом исходе работы скрипта
 trap cleanup EXIT HUP INT TERM
 
-# Компиляция C++-файла
-echo "Компиляция C++ файла..."
-if g++ -o "$TEMP_DIR/$OUTPUT_FILENAME" "$SOURCE_FILE"; then
+# Копируем исходник во временную папку
+cp "$SOURCE_FILE" "$TEMP_DIR/$SOURCE_FILENAME"
+
+# Переходим во временный каталог (теперь работаем ВНУТРИ него)
+cd "$TEMP_DIR" || error_exit "Не удалось перейти в $TEMP_DIR"
+
+echo "Компиляция C++ файла началась"
+
+# Компилируем текущий файл ($SOURCE_FILENAME) в текущую папку (имя просто $OUTPUT_FILENAME)
+if g++ -o "$OUTPUT_FILENAME" "$SOURCE_FILENAME"; then
     COMPILATION_SUCCESSFUL=true
 else
     error_exit "Ошибка компиляции"
@@ -55,9 +66,10 @@ fi
 
 # Проверка наличия скомпилированного файла
 if [ "$COMPILATION_SUCCESSFUL" = true ]; then
-    if [ -f "$TEMP_DIR/$OUTPUT_FILENAME" ]; then
-        mv "$TEMP_DIR/$OUTPUT_FILENAME" "$SOURCE_DIR/"
-        echo "Компиляция окончена. Результат: $SOURCE_DIR/$OUTPUT_FILENAME"
+    if [ -f "$OUTPUT_FILENAME" ]; then
+        # Возвращаем файл обратно, используя абсолютный путь ($START_DIR)
+        mv "$OUTPUT_FILENAME" "$START_DIR/$SOURCE_DIR/"
+        echo "Компиляция окончена. Результат: $START_DIR/$SOURCE_DIR/$OUTPUT_FILENAME"
     else
         error_exit "Скомпилированный файл не найден в temp каталоге."
     fi
