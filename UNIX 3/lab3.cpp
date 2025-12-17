@@ -1,110 +1,145 @@
 #include <iostream>
-#include <filesystem>
-#include <fstream>
-#include <string>
-#include <unordered_map>
 #include <vector>
-#include <iomanip>
+#include <unordered_map>
+#include <string>
+#include <filesystem>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <openssl/sha.h>
 
-using namespace std;
-namespace fs = std::filesystem;
-string compute_sha1(const fs::path& filepath) {
-    ifstream file(filepath, ios::binary);
-    if (!file.is_open()) {
-        throw runtime_error("Не удалось открыть файл: " + filepath.string());
+using namespace std;              
+namespace fs = std::filesystem;   
+
+string sha1_calculate(const string& path) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd == -1) {
+        cerr << "Предупреждение: не удалось открыть '" << path << "' для чтения (пропускаем)\n";
+        return "";
     }
 
-    SHA_CTX sha1;
-    SHA1_Init(&sha1);
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return "";
+    }
 
-    char buffer[4096];
-    while (file.good()) {
-        file.read(buffer, sizeof(buffer));
-        SHA1_Update(&sha1, buffer, file.gcount());
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        return "";
+    }
+
+    SHA_CTX ctx;
+    if (!SHA1_Init(&ctx)) {
+        close(fd);
+        cerr << "Ошибка: SHA1_Init не удался для '" << path << "'\n";
+        return "";
+    }
+
+    constexpr size_t BUF_SIZE = 8192;
+    vector<unsigned char> buffer(BUF_SIZE);
+    ssize_t n;
+
+    while ((n = read(fd, buffer.data(), BUF_SIZE)) > 0) {
+        if (!SHA1_Update(&ctx, buffer.data(), n)) {
+            close(fd);
+            cerr << "Ошибка: SHA1_Update не удался для '" << path << "'\n";
+            return "";
+        }
+    }
+
+    if (n == -1) {
+        close(fd);
+        cerr << "Ошибка чтения из '" << path << "'\n";
+        return "";
     }
 
     unsigned char hash[SHA_DIGEST_LENGTH];
-    SHA1_Final(hash, &sha1);
-
-    stringstream ss;
-    ss << hex << setfill('0');
-    for (int i = 0; i < SHA_DIGEST_LENGTH; ++i) {
-        ss << setw(2) << static_cast<int>(hash[i]);
+    if (!SHA1_Final(hash, &ctx)) {
+        close(fd);
+        cerr << "Ошибка: SHA1_Final не удался для '" << path << "'\n";
+        return "";
     }
+    close(fd);
 
-    return ss.str();
+    char hex[SHA_DIGEST_LENGTH * 2 + 1];
+    for (int i = 0; i < SHA_DIGEST_LENGTH; ++i) {
+        snprintf(&hex[i * 2], 3, "%02x", hash[i]);
+    }
+    return string(hex, SHA_DIGEST_LENGTH * 2);
 }
 
 int main(int argc, char* argv[]) {
-    setlocale(LC_ALL, "");
-
-    if (argc < 2) {
-        cerr << "Использование: " << argv[0] << " <путь_к_каталогу>" << endl;
+    if (argc != 2) {
+        cerr << "Ошибка: каталог не выбран. Добавьте аргумент - директорию\n ";
         return 1;
     }
 
-    fs::path target_dir = argv[1];
-
-    if (!fs::exists(target_dir) || !fs::is_directory(target_dir)) {
-        cerr << "Ошибка: Путь не существует или это не директория." << endl;
-        return 1;
+    string root_path = argv[1];
+    if (!fs::exists(root_path)) {
+        cerr << "Ошибка: каталог '" << root_path << "' не существует.\n";
+        return 2;
+    }
+    if (!fs::is_directory(root_path)) {
+        cerr << "Ошибка: '" << root_path << "' не является каталогом.\n";
+        return 3;
     }
 
-    unordered_map<string, fs::path> seen_hashes;
-    
-    size_t files_processed = 0;
-    size_t duplicates_replaced = 0;
-    size_t errors_count = 0;
+    unordered_map<string, string> hash_to_first_path;
+    int files_processed = 0;
+    int links_created = 0;
 
-    cout << "Сканирование директории: " << target_dir << endl;
+    cout << "Сканирование каталога: " << root_path << "\n";
 
     try {
-        for (const auto& entry : fs::recursive_directory_iterator(target_dir)) {
-            if (!entry.is_regular_file() || entry.is_symlink()) {
-                continue;
-            }
+        for (const auto& entry : fs::recursive_directory_iterator(root_path)) {
+            if (!entry.is_regular_file()) continue;
 
-            fs::path current_path = entry.path();
+            string path = entry.path().string();
+            string hash = sha1_calculate(path);
+            if (hash.empty()) continue;
+
             files_processed++;
 
-            try {
-                string hash = compute_sha1(current_path);
+            auto it = hash_to_first_path.find(hash);
+            if (it == hash_to_first_path.end()) {
+                hash_to_first_path[hash] = path;
+                cout << "Хеш " << hash << " → сохранён как оригинал: " << path << "\n";
+            } else {
+                const string& first_path = it->second;
 
-                auto it = seen_hashes.find(hash);
-
-                if (it == seen_hashes.end()) {
-
-                    seen_hashes[hash] = current_path;
-                } else {
-
-                    fs::path original_path = it->second;
-
-                    if (fs::equivalent(current_path, original_path)) {
-                        continue; 
-                    }
-
-                    cout << "[ДУБЛИКАТ] " << current_path.filename() << " == " << original_path.filename() << endl;
-
-                    fs::remove(current_path);
-                    
-                    fs::create_hard_link(original_path, current_path);
-                    
-                    duplicates_replaced++;
+                struct stat st_orig, st_curr;
+                if (stat(first_path.c_str(), &st_orig) != 0 || stat(path.c_str(), &st_curr) != 0) {
+                    cerr << "Предупреждение: не удалось получить stat для '" << path << "' или '" << first_path << "'\n";
+                    continue;
                 }
-            } catch (const exception& ex) {
-                cerr << "Ошибка с файлом " << current_path.filename() << ": " << ex.what() << endl;
-                errors_count++;
+
+                if (st_orig.st_dev == st_curr.st_dev && st_orig.st_ino == st_curr.st_ino) {
+                    cout << "[!] '" << path << "' уже hard link на '" << first_path << "'.\n";
+                    continue;
+                }
+
+                if (unlink(path.c_str()) != 0) {
+                    cerr << "Ошибка: не удалось удалить '" << path << "' перед созданием hard link\n";
+                    continue;
+                }
+
+                if (link(first_path.c_str(), path.c_str()) != 0) {
+                    cerr << "Ошибка: не удалось создать hard link от '" << first_path << "' к '" << path << "'\n";
+                    continue;
+                }
+                links_created++;
+                cout << "[!!!] '" << path << "' заменён hard link на '" << first_path << "'\n";
             }
         }
-    } catch (const fs::filesystem_error& ex) {
-        cerr << "Критическая ошибка файловой системы: " << ex.what() << endl;
-        return 1;
+    } catch (const fs::filesystem_error& e) {
+        cerr << "Ошибка обхода каталога: " << e.what() << "\n";
+        return 4;
     }
 
-    cout << "Всего проверено файлов: " << files_processed << endl;
-    cout << "Заменено на жесткие ссылки: " << duplicates_replaced << endl;
-    if (errors_count > 0) cout << "Ошибок доступа: " << errors_count << endl;
+    cout << "Обработано файлов: " << files_processed << "\n"
+         << "Создано жёстких ссылок: " << links_created << "\n";
 
     return 0;
 }
