@@ -1,81 +1,83 @@
-import os
-import json
 import asyncio
+import json
+import os
 import signal
-from loguru import logger
 import socket
+from typing import Dict, Any
+from loguru import logger
 from aiokafka import AIOKafkaConsumer
 
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-TASK_TOPIC = "tasks_topic"
+KAFKA_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", default="kafka:9092")
+INPUT_TOPIC = "tasks_topic"
 
-CONSUMER_GROUP_ID = "async_analyzer_workers_group" 
+GROUP_NAME = "text_parity_analyzers"
+INSTANCE_ID = socket.gethostname()
 
-WORKER_ID = socket.gethostname()
+stop_signal = asyncio.Event()
 
-shutdown_event = asyncio.Event()
+def signal_handler(signum: int):
+    """Обработчик сигналов завершения"""
+    logger.warning(f"Получен сигнал завершения {signum} — завершение текущей задачи...")
+    stop_signal.set()
 
-def handle_sigterm():
-    logger.warning("SIGTERM received — finishing current task before shutdown...")
-    shutdown_event.set()
-
-async def process_task(task: dict, worker_id: str):
-    input_text = task.get("input_text", "")
+async def analyze_message(data: Dict[str, Any], instance: str) -> None:
+    """Анализ длины текста и определение чётности"""
+    source_text = data.get("input_text", "")
     
-    char_count = len(input_text)
-    parity = "even" if char_count % 2 == 0 else "odd"  # чёт/нечёт
+    text_length = len(source_text)
+    result_type = "чётная" if text_length % 2 == 0 else "нечётная"
 
-    await asyncio.sleep(2)  
+    await asyncio.sleep(2)  #симуляция бурной работы
 
-    logger.info(f"[{worker_id}] Task processed.")
-    logger.info(f"Source text: \"{input_text[:30]}...\"")
-    logger.info(f"Length: {char_count} characters -> {parity.upper()}.\n")
+    logger.info(f"[{instance}] ✅ Задача выполнена")
+    logger.info(f"Исходный текст: \"{source_text[:30]}...\"")
+    logger.info(f"Длина: {text_length} символов → {result_type.upper()}\n")
 
-async def run_worker():
-    loop = asyncio.get_running_loop()
-
-    loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
-    loop.add_signal_handler(signal.SIGINT, handle_sigterm)
-
-    logger.info(f"Worker [{WORKER_ID}] starting up...")
+async def start_processor():
+    """Основной цикл обработки сообщений"""
+    current_loop = asyncio.get_running_loop()
     
-    consumer = None
-    retry_count = 0
-    max_retries = 25
+    current_loop.add_signal_handler(signal.SIGTERM, lambda: signal_handler(signal.SIGTERM))
+    current_loop.add_signal_handler(signal.SIGINT, lambda: signal_handler(signal.SIGINT))
 
-    while retry_count < max_retries:
+    logger.info(f"Процессор [{INSTANCE_ID}] запускается...")
+    
+    kafka_consumer = None
+    connection_attempts = 0
+    max_connections = 25
+
+    while connection_attempts < max_connections:
         try:
-            logger.info(f"Worker [{WORKER_ID}] connecting to Kafka ({retry_count + 1}/{max_retries})...")
-            consumer = AIOKafkaConsumer(
-                TASK_TOPIC,
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                group_id=CONSUMER_GROUP_ID,
+            logger.info(f"[{INSTANCE_ID}] Подключение к Kafka (попытка {connection_attempts + 1}/{max_connections})...")
+            kafka_consumer = AIOKafkaConsumer(
+                INPUT_TOPIC,
+                bootstrap_servers=KAFKA_SERVERS,
+                group_id=GROUP_NAME,
                 auto_offset_reset='latest',
                 enable_auto_commit=False,
-                value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+                value_deserializer=lambda msg: json.loads(msg.decode('utf-8'))
             )
-            await consumer.start()
-            logger.info(f"Worker [{WORKER_ID}] connected and listening to topic '{TASK_TOPIC}'...")
+            await kafka_consumer.start()
+            logger.info(f"[{INSTANCE_ID}] Подключён к топику '{INPUT_TOPIC}'")
             break
-        except Exception as e:
-            logger.warning(f"Worker connection failed: {e}")
-            retry_count += 1
+        except Exception as exc:
+            logger.warning(f"[{INSTANCE_ID}] Ошибка подключения: {exc}")
+            connection_attempts += 1
             await asyncio.sleep(5)
     
-    if not consumer:
-        logger.critical(f"Critical: Worker [{WORKER_ID}] could not connect to Kafka after {max_retries} retries. Exiting.")
+    if kafka_consumer is None:
+        logger.critical(f"[{INSTANCE_ID}] ❌ Критическая ошибка: не удалось подключиться к Kafka")
         return
 
     try:
-        while not shutdown_event.is_set():
-            msg = await consumer.getone()
-            task = msg.value
-            await process_task(task, WORKER_ID)
-
-            await consumer.commit()
+        while not stop_signal.is_set():
+            record = await kafka_consumer.getone()
+            message_data = record.value
+            await analyze_message(message_data, INSTANCE_ID)
+            await kafka_consumer.commit()
     finally:
-        await consumer.stop()
-        logger.info(f"Worker [{WORKER_ID}] stopped.")
+        await kafka_consumer.stop()
+        logger.info(f"[{INSTANCE_ID}] Процессор остановлен")
 
 if __name__ == "__main__":
-    asyncio.run(run_worker())
+    asyncio.run(start_processor())
