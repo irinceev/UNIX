@@ -1,58 +1,68 @@
-import os
-import json
 import asyncio
+import json
+import os
 from loguru import logger
+from aiokafka import AIOKafkaProducer
 from fastapi import FastAPI
 from pydantic import BaseModel
-from aiokafka import AIOKafkaProducer
+from typing import Optional
 
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-TASK_TOPIC = "tasks_topic"
+KAFKA_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", default="kafka:9092")
+QUEUE_TOPIC = "tasks_topic"
 
-app = FastAPI()
-producer = None
+application = FastAPI()
+kafka_producer: Optional[AIOKafkaProducer] = None
 
-class TextData(BaseModel):
+class InputText(BaseModel):
     text: str
 
-@app.on_event("startup")
-async def startup_event():
-    global producer
-    retry_count = 0
-    max_retries = 25
+async def initialize_kafka() -> None:
+    """Инициализация подключения к Kafka брокеру"""
+    global kafka_producer
+    attempts = 0
+    max_attempts = 25
     
-    while retry_count < max_retries:
+    while attempts < max_attempts:
         try:
-            logger.info(f"Attempting to connect to Kafka ({retry_count + 1}/{max_retries})...")
-            producer = AIOKafkaProducer(
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, 
-                value_serializer=lambda v: json.dumps(v).encode('utf-8')
-                )
-            await producer.start()
-            logger.info("Producer connected successfully!")
+            logger.info(f"Подключение к Kafka (попытка {attempts + 1}/{max_attempts})")
+            kafka_producer = AIOKafkaProducer(
+                bootstrap_servers=KAFKA_SERVERS,
+                value_serializer=lambda data: json.dumps(data).encode('utf-8')
+            )
+            await kafka_producer.start()
+            logger.info("Успешное подключение к Kafka!")
             return
-        except Exception as e:
-            logger.warning(f"Connection attempt failed: {e}")
-            retry_count += 1
+        except Exception as error:
+            logger.warning(f"Ошибка подключения: {error}")
+            attempts += 1
             await asyncio.sleep(5)
-            
-    raise Exception("Could not connect to Kafka after multiple retries")
+    
+    raise RuntimeError("Не удалось подключиться к Kafka")
+
+async def cleanup_kafka() -> None:
+    """Завершение работы с Kafka"""
+    if kafka_producer:
+        await kafka_producer.stop()
+        logger.info("Kafka продюсер остановлен")
+
+@app.on_event("startup")
+async def on_startup():
+    await initialize_kafka()
 
 @app.on_event("shutdown")
-async def shutdown_event():
-    if producer:
-        await producer.stop()
-        logger.info("Kafka producer stopped successfully.")
+async def on_shutdown():
+    await cleanup_kafka()
 
 @app.post("/analyze", status_code=202)
-async def analyze_text(data: TextData):    
-
-    await producer.send_and_wait(
-        TASK_TOPIC, 
-        {"input_text": data.text,}
+async def process_text(input_data: InputText):
+    """Обработка входящего текста, постановка задачи в очередь"""
+    
+    await kafka_producer.send_and_wait(
+        QUEUE_TOPIC,
+        {"input_text": input_data.text}
     )
-
+    
     return {
         "status": "queued",
-        "message": "Text received, analysis result will be provided by workers."
+        "message": "Задача принята, результат анализа будет сформирован воркерами"
     }
