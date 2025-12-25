@@ -29,7 +29,7 @@ async def analyze_message(data: Dict[str, Any], instance: str) -> None:
 
     await asyncio.sleep(2)  #симуляция бурной работы
 
-    logger.info(f"[{instance}] ✅ Задача выполнена")
+    logger.info(f"[{instance}] УРА Задача выполнена")
     logger.info(f"Исходный текст: \"{source_text[:30]}...\"")
     logger.info(f"Длина: {text_length} символов → {result_type.upper()}\n")
 
@@ -66,7 +66,7 @@ async def start_processor():
             await asyncio.sleep(5)
     
     if kafka_consumer is None:
-        logger.critical(f"[{INSTANCE_ID}] ❌ Критическая ошибка: не удалось подключиться к Kafka")
+        logger.critical(f"[{INSTANCE_ID}] Критическая ошибка: не удалось подключиться к Kafka")
         return
 
     try:
